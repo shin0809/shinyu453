@@ -1,151 +1,167 @@
+import tiktoken
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# models
+from langchain_openai import ChatOpenAI
+#from langchain_anthropic import ChatAnthropic
+#from langchain_google_genai import ChatGoogleGenerativeAI
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+###### dotenv を利用しない場合は消してください ######
+#try:
+#    from dotenv import load_dotenv
+#    load_dotenv()
+#except ImportError:
+#    import warnings
+#    warnings.warn("dotenv not found. Please make sure to set your environment variables manually.", ImportWarning)
+################################################
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+MODEL_PRICES = {
+    "input": {
+        "gpt-3.5-turbo": 0.5 / 1_000_000,
+        "gpt-4o": 5 / 1_000_000,
+        "claude-3-5-sonnet-20240620": 3 / 1_000_000,
+        "gemini-1.5-pro-latest": 3.5 / 1_000_000
+    },
+    "output": {
+        "gpt-3.5-turbo": 1.5 / 1_000_000,
+        "gpt-4o": 15 / 1_000_000,
+        "claude-3-5-sonnet-20240620": 15 / 1_000_000,
+        "gemini-1.5-pro-latest": 10.5 / 1_000_000
+    }
+}
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+def init_page():
+    st.set_page_config(
+        page_title="My Great ChatGPT",
+        page_icon="$D83E$DD17"
     )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+    st.header("My Great ChatGPT $D83E$DD17")
+    st.sidebar.title("Options")
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+def init_messages():
+    clear_button = st.sidebar.button("Clear Conversation", key="clear")
+    # clear_button が押された場合や message_history がまだ存在しない場合に初期化
+    if clear_button or "message_history" not in st.session_state:
+        st.session_state.message_history = [
+            ("system", "You are a helpful assistant.")
+        ]
 
-st.header(f'GDP in {to_year}', divider='gray')
 
-''
+def select_model():
+    # スライダーを追加し、temperatureを0から2までの範囲で選択可能にする
+    # 初期値は0.0、刻み幅は0.01とする
+    temperature = st.sidebar.slider(
+        "Temperature:", min_value=0.0, max_value=2.0, value=0.0, step=0.01)
 
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+    models = ("GPT-3.5", "GPT-4", "Claude 3.5 Sonnet", "Gemini 1.5 Pro")
+    model = st.sidebar.radio("Choose a model:", models)
+    if model == "GPT-3.5":
+        st.session_state.model_name = "gpt-3.5-turbo"
+        return ChatOpenAI(
+            temperature=temperature,
+            model_name=st.session_state.model_name
         )
+    elif model == "GPT-4":
+        st.session_state.model_name = "gpt-4o"
+        return ChatOpenAI(
+            temperature=temperature,
+            model_name=st.session_state.model_name
+        )
+    elif model == "Claude 3.5 Sonnet":
+        st.session_state.model_name = "claude-3-5-sonnet-20240620"
+        return ChatAnthropic(
+            temperature=temperature,
+            model_name=st.session_state.model_name
+        )
+    elif model == "Gemini 1.5 Pro":
+        st.session_state.model_name = "gemini-1.5-pro-latest"
+        return ChatGoogleGenerativeAI(
+            temperature=temperature,
+            model=st.session_state.model_name
+        )
+
+
+def init_chain():
+    st.session_state.llm = select_model()
+    prompt = ChatPromptTemplate.from_messages([
+        *st.session_state.message_history,
+        ("user", "{user_input}")  # ここにあとでユーザーの入力が入る
+    ])
+    output_parser = StrOutputParser()
+    return prompt | st.session_state.llm | output_parser
+
+
+def get_message_counts(text):
+    if "gemini" in st.session_state.model_name:
+        return st.session_state.llm.get_num_tokens(text)
+    else:
+        # Claude 3 はトークナイザーを公開していないので、tiktoken を使ってトークン数をカウント
+        # これは正確なトークン数ではないが、大体のトークン数をカウントすることができる
+        if "gpt" in st.session_state.model_name:
+            encoding = tiktoken.encoding_for_model(st.session_state.model_name)
+        else:
+            encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")  # 仮のものを利用
+        return len(encoding.encode(text))
+
+
+def calc_and_display_costs():
+    output_count = 0
+    input_count = 0
+    for role, message in st.session_state.message_history:
+        # tiktoken でトークン数をカウント
+        token_count = get_message_counts(message)
+        if role == "ai":
+            output_count += token_count
+        else:
+            input_count += token_count
+
+    # 初期状態で System Message のみが履歴に入っている場合はまだAPIコールが行われていない
+    if len(st.session_state.message_history) == 1:
+        return
+
+    input_cost = MODEL_PRICES['input'][st.session_state.model_name] * input_count
+    output_cost = MODEL_PRICES['output'][st.session_state.model_name] * output_count
+    if "gemini" in st.session_state.model_name and (input_count + output_count) > 128000:
+        input_cost *= 2
+        output_cost *= 2
+
+    cost = output_cost + input_cost
+
+    st.sidebar.markdown("## Costs")
+    st.sidebar.markdown(f"**Total cost: ${cost:.5f}**")
+    st.sidebar.markdown(f"- Input cost: ${input_cost:.5f}")
+    st.sidebar.markdown(f"- Output cost: ${output_cost:.5f}")
+
+
+def main():
+    init_page()
+    init_messages()
+    chain = init_chain()
+
+    # チャット履歴の表示 (第2章から少し位置が変更になっているので注意)
+    for role, message in st.session_state.get("message_history", []):
+        st.chat_message(role).markdown(message)
+
+    # ユーザーの入力を監視
+    if user_input := st.chat_input("聞きたいことを入力してね！"):
+        st.chat_message('user').markdown(user_input)
+
+        # LLMの返答を Streaming 表示する
+        with st.chat_message('ai'):
+            response = st.write_stream(chain.stream({"user_input": user_input}))
+
+        # チャット履歴に追加
+        st.session_state.message_history.append(("user", user_input))
+        st.session_state.message_history.append(("ai", response))
+
+    # コストを計算して表示
+    calc_and_display_costs()
+
+
+if __name__ == '__main__':
+    main()
